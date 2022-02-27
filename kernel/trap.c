@@ -29,6 +29,54 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+//栈自增处理
+int stackGrow(pagetable_t old,uint64 fault_address){
+  //printf("trap: check grow\n");
+  fault_address=PGROUNDDOWN(fault_address);
+  if(fault_address>=MAXVA) return -1;
+  //printf("trap: fault_address is %d\n",fault_address);
+  //char *mem;   
+  struct proc *p = myproc();
+  uint heapBorder = p->sz + PGSIZE;     //堆和栈始终相差一个页面，保证堆中数据安全
+  uint stackBorder = p->stackSize;
+
+  //堆和栈始终相差一个页面，保证堆中数据安全
+  int isLackOfStackCapacity = fault_address >= heapBorder && fault_address < stackBorder;
+ // printf("fault_address: %x\n",fault_address);
+ // printf("heapborder: %x\n",heapBorder);
+ // printf("stackBorder: %x\n",stackBorder);
+  //每次分配一个页面
+  if(!isLackOfStackCapacity) {
+    //printf("trap: Begin to grow\n");
+    /*mem = kalloc();
+    if(mem == 0) {//物理内存不足
+      printf("trap: Out of memory\n");
+      return -1;
+    }
+    uint64 newStackBorder = stackBorder - PGSIZE;
+    //修改页表，增加映射关系
+    if(mappages(old, newStackBorder, PGSIZE, (uint64)mem, PTE_W|PTE_U) != 0) {
+      printf("trap: Mapping error\n");
+      uvmdealloc(old, newStackBorder, stackBorder);
+      kfree(mem);
+      return -1;
+    }
+    memset(mem, 0, PGSIZE);*/
+    int k=(PGROUNDUP(p->stackSize)-PGROUNDDOWN(fault_address))/PGSIZE;
+    if(uvmalloc(old,p->stackSize-k*PGSIZE,p->stackSize)==0){
+        printf("trap: uvmalloc error!\n");
+        return -1;
+    }
+    p->stackSize -= PGSIZE;
+  }else{
+      printf("trap: Cannot grow\n");
+      return -1;
+  }
+  //printf("trap: Growed!\n");
+  //printf("trap: Current stackSize is %d!\n",p->stackSize);
+  return 0;
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -65,9 +113,23 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  }else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  }else if(r_scause()==15){
+    //printf("usertrap: page fault\n");
+    // printf("usertrap():in page fault\n");
+    //出错的page地址
+    pagetable_t old=p->pagetable;   //原始页表
+    uint64 fault_address=r_stval();   //触发page fault的虚拟地址
+    if(fault_address>=MAXVA) p->killed=1;  //超过给进程分配的内存
+    //将虚拟地址转化到物理地址
+    else if(stackGrow(old,fault_address)!=0){
+      p->killed=1;
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      // exit(-1);
+    }
+  }else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;

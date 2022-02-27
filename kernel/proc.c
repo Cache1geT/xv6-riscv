@@ -93,7 +93,6 @@ allocpid() {
   pid = nextpid;
   nextpid = nextpid + 1;
   release(&pid_lock);
-
   return pid;
 }
 
@@ -153,8 +152,10 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
-  if(p->pagetable)
+  if(p->pagetable){
+    //printf("freeproc\n");
     proc_freepagetable(p->pagetable, p->sz);
+  }
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -206,6 +207,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+  //printf("proc_freepagetable\n");
   uvmfree(pagetable, sz);
 }
 
@@ -282,12 +284,15 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
+  //printf("fork: Copy from parent(%d) to child(%d)\n",p->pid,np->pid);
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
   }
   np->sz = p->sz;
+  np->stackSize = p->stackSize;
+  //printf("fork: Copied!\n",p->pid,np->pid);
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -386,6 +391,7 @@ wait(uint64 addr)
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
+  //printf("wait: current waiting pid: %d\n",p->pid);
 
   acquire(&wait_lock);
 
@@ -393,12 +399,14 @@ wait(uint64 addr)
     // Scan through table looking for exited children.
     havekids = 0;
     for(np = proc; np < &proc[NPROC]; np++){
+      //printf("waiting\n");
       if(np->parent == p){
         // make sure the child isn't still in exit() or swtch().
         acquire(&np->lock);
 
         havekids = 1;
         if(np->state == ZOMBIE){
+          //printf("found one\n");
           // Found one.
           pid = np->pid;
           if(addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
@@ -407,6 +415,7 @@ wait(uint64 addr)
             release(&wait_lock);
             return -1;
           }
+          printf("wait\n");
           freeproc(np);
           release(&np->lock);
           release(&wait_lock);
@@ -418,6 +427,7 @@ wait(uint64 addr)
 
     // No point waiting if we don't have any children.
     if(!havekids || p->killed){
+      printf("nokids\n");
       release(&wait_lock);
       return -1;
     }

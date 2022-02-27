@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -263,22 +265,32 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 
 // Recursively free page-table pages.
 // All leaf mappings must already have been removed.
+int cnt=0;
+int l1=0;
+int l2=0;
 void
 freewalk(pagetable_t pagetable)
 {
+  cnt+=1;
   // there are 2^9 = 512 PTEs in a page table.
   for(int i = 0; i < 512; i++){
     pte_t pte = pagetable[i];
     if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
       // this PTE points to a lower-level page table.
       uint64 child = PTE2PA(pte);
+      if(cnt==1)
+          l1=i;
+      else
+          l2=i;
       freewalk((pagetable_t)child);
       pagetable[i] = 0;
     } else if(pte & PTE_V){
-      panic("freewalk: leaf");
+      //printf("l1 %d l2 %d l3 %dth PTE has PTE_V(%d)\n",l1,l2,i,PTE_V);
+     // panic("freewalk: leaf");
     }
   }
   kfree((void*)pagetable);
+  cnt-=1;
 }
 
 // Free user memory pages,
@@ -286,9 +298,26 @@ freewalk(pagetable_t pagetable)
 void
 uvmfree(pagetable_t pagetable, uint64 sz)
 {
+  struct proc *p = myproc();
+  //uint64 x = (TRAPFRAME-p->stackSize)/PGSIZE-1;
+ // printf("uvmfree: %d pages from %d\n",x,p->stackSize);
+  //printf("uvmfree: Current pid is  %d\n",p->pid);
+  //printf("uvmfree: stackSize is  %d\n",p->stackSize);
+  if(p->pid!=1){
+    //printf("uvmfree: unmapping stack\n");
+    uvmunmap(pagetable,p->stackSize,(TRAPFRAME-p->stackSize)/PGSIZE-1,1);
+    //printf("uvmfree: stack unmapped!\n",p->stackSize);
+    //printf("uvmfree: unmapping guard page\n",p->stackSize);
+    //uint64 x=0x3fffffd000;
+    //printf("%d and %d\n",TRAPFRAME-PGSIZE,x);
+    //uvmunmap(pagetable,x,1,1);
+    //printf("uvmfree: guard page unmapped!\n",p->stackSize);
+  }
   if(sz > 0)
     uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
+  //printf("uvmfree: Ready to free page table!\n");
   freewalk(pagetable);
+  //printf("uvmfree: Page table freed!\n");
 }
 
 // Given a parent process's page table, copy
@@ -300,10 +329,12 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
+  //printf("uvmcopy: Starting copy\n");
   pte_t *pte;
   uint64 pa, i;
   uint flags;
   char *mem;
+  struct proc *p = myproc();
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -320,6 +351,22 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       goto err;
     }
   }
+  for(i = p->stackSize; i < TRAPFRAME-PGSIZE; i += PGSIZE){
+    if((pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy: pte should exist");
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy: page not present");
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    if((mem = kalloc()) == 0)
+      goto err;
+    memmove(mem, (char*)pa, PGSIZE);
+    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+      kfree(mem);
+      goto err;
+    }
+  }
+  //printf("uvmcopy: Copied!\n");
   return 0;
 
  err:
